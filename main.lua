@@ -1,5 +1,6 @@
 function love.load()
     WINDOW_W, WINDOW_H = 1000, 700
+    DT = 0
 
     love.window.setMode(WINDOW_W, WINDOW_H, {
         resizable = true,
@@ -32,6 +33,11 @@ function love.load()
     currentTool = TOOL_SELECT
 
     dragForce = 10000
+
+    rotateSpeed = 15 * 10000
+    originalRS = rotateSpeed
+    qDown = false
+    eDown = false
 
     -- Properties panel
     PROPS_W = 200
@@ -78,7 +84,32 @@ end
 
 function love.update(dt)
     local scaledDt = dt * timeScale
+    DT = scaledDt
     world:update(scaledDt)
+
+    if #selectedObjects then
+        if qDown then
+            rotateSpeed = rotateSpeed + math.rad(1)
+            for _, obj in ipairs(selectedObjects) do
+                local body = obj.body
+                body:applyTorque(rotateSpeed)
+                if currentTool == TOOL_MOVE then
+                    body:setAngle(body:getAngle() + rotateSpeed * 0.00002 * scaledDt)
+                end
+            end
+        end
+
+        if eDown then
+            rotateSpeed = rotateSpeed + math.rad(1)
+            for _, obj in ipairs(selectedObjects) do
+                local body = obj.body
+                body:applyTorque(-rotateSpeed)
+                if currentTool == TOOL_MOVE then
+                    body:setAngle(body:getAngle() - rotateSpeed * 0.00002 * scaledDt)
+                end
+            end
+        end
+    end
 end
 
 function love.resize(w, h)
@@ -155,8 +186,7 @@ function love.draw()
         [TOOL_MOVE] = "Move",
         [TOOL_BALL] = "Spawn Ball",
         [TOOL_BOX] = "Spawn Box",
-        [TOOL_DRAG] = "Drag",
-        [TOOL_FREEZE] = "Freeze"
+        [TOOL_DRAG] = "Drag"
     }
 
     love.graphics.setColor(1, 1, 1)
@@ -173,6 +203,7 @@ function love.draw()
     love.graphics.print("N and M to Increase And Decrease Drag Force", WINDOW_W - 280, 50)
     love.graphics.print("Middle Click to pan the Camera", WINDOW_W - 240, 70)
     love.graphics.print("Scroll Wheel to zoom in and out", WINDOW_W - 240, 90)
+    love.graphics.print("Q and E to rotate an object", WINDOW_W - 230, 110)
 
     -- Properties Panel
     drawPropertiesPanel()
@@ -236,12 +267,6 @@ function love.mousepressed(x, y, button)
         if obj then
             mouseJoint = love.physics.newMouseJoint(obj.body, wx, wy)
             mouseJoint:setMaxForce(dragForce)
-        end
-
-    elseif currentTool == TOOL_FREEZE then
-        local obj = getObjectAtPoint(wx, wy)
-        if obj then
-            toggleFreeze(obj)
         end
     end
 
@@ -365,7 +390,6 @@ function love.keypressed(key)
     if key == "3" then currentTool = TOOL_BALL end
     if key == "4" then currentTool = TOOL_BOX end
     if key == "5" then currentTool = TOOL_DRAG end
-    if key == "6" then currentTool = TOOL_FREEZE end
 
     -- Remove Selected Objects
     if key == "delete" then
@@ -383,6 +407,7 @@ function love.keypressed(key)
         end
     end
 
+    -- Increase and decrease drag force
     if key == "n" then
         dragForce = dragForce + 1000
         if mouseJoint then
@@ -395,6 +420,29 @@ function love.keypressed(key)
         if mouseJoint then
             mouseJoint:setMaxForce(dragForce)
         end
+    end
+
+    -- Rotate selected objects with Q / E
+    if #selectedObjects > 0 then
+        if key == "q" then
+            qDown = true
+        end
+
+        if key == "e" then
+            eDown = true
+        end
+    end
+end
+
+function love.keyreleased(key)
+    if key == "q" then
+        rotateSpeed = originalRS
+        qDown = false
+    end
+
+    if key == "e" then
+        rotateSpeed = originalRS
+        eDown = false
     end
 end
 
@@ -710,7 +758,7 @@ function drawPropertiesPanel()
 
     drawButton("-", PROPS_X+130, y, 20, 20, function()
         local new = rest - 0.1
-        if not outLimits then new = math.max(0, new) end
+        new = math.max(0, new)
         fixture:setRestitution(new)
     end)
 
@@ -727,7 +775,7 @@ function drawPropertiesPanel()
 
     drawButton("-", PROPS_X+130, y, 20, 20, function()
         local new = fric - 0.1
-        if not outLimits then new = math.max(0, new) end
+        new = math.max(0, new)
         fixture:setFriction(new)
     end)
 
@@ -744,7 +792,7 @@ function drawPropertiesPanel()
 
     drawButton("-", PROPS_X + 130, y, 20, 20, function ()
         local new = density - 0.2
-        if not outLimits then new = math.max(0.1, new) end
+        new = math.max(0.1, new)
         setObjectDensity(obj, new)
     end)
 
