@@ -43,7 +43,7 @@ function love.load()
     PROPS_W = 200
     PROPS_H = 300
     PROPS_X = WINDOW_W - PROPS_W - 10
-    PROPS_Y = WINDOW_H - PROPS_W - 10
+    PROPS_Y = WINDOW_H - PROPS_H - 10
 
     draggingGroup = false
     dragOffset = {}
@@ -68,7 +68,42 @@ function love.load()
     timeScale = 1
     paused = false
 
+    inSlowMotion = false
+    slowMotionIcon = love.graphics.newImage("textures/Slow motion icon.png")
+
     outLimits = false
+
+    -- Game States
+    STATE_MENU = "menu"
+    STATE_WORLD = "world"
+    STATE_LOAD = "load"
+
+    gameState = STATE_MENU
+    
+    SAVE_DIR = "saves/"
+    love.filesystem.createDirectory(SAVE_DIR)
+
+    currentWorldName = nil   -- like "my_world_1.lua"
+    isNamingWorld = false
+    worldNameInput = ""
+    hoveredSaveIndex = nil
+
+    AUTO_SAVE_INTERVAL = 60 -- seconds
+    autoSaveTimer = 0
+
+    -- Load Menu stuff
+    loadMenuScroll = 0
+    LOAD_ROW_HEIGHT = 34
+
+    lastClickTime = 0
+    DOUBLE_CLICK_TIME = 0.35
+    lastClickedFile = nil
+
+    loadSearch = ""
+
+    saveCache = {} -- { filename, meta }
+
+
 
     love.physics.setMeter(64)
     world = love.physics.newWorld(0, 9.81 * 64, true)
@@ -87,7 +122,8 @@ function love.update(dt)
     DT = scaledDt
     world:update(scaledDt)
 
-    if #selectedObjects then
+    -- Rotation Logic/Tool
+    if #selectedObjects > 0 then
         if qDown then
             rotateSpeed = rotateSpeed + math.rad(1)
             for _, obj in ipairs(selectedObjects) do
@@ -110,6 +146,17 @@ function love.update(dt)
             end
         end
     end
+
+    -- Auto save timer
+    if gameState == STATE_WORLD and currentWorldName then
+        autoSaveTimer = autoSaveTimer + dt
+
+        if autoSaveTimer >= AUTO_SAVE_INTERVAL then
+            autoSaveTimer = 0
+            saveWorld("saves/" .. currentWorldName)
+            print("Auto-saved:", currentWorldName)
+        end
+    end
 end
 
 function love.resize(w, h)
@@ -120,14 +167,31 @@ function love.resize(w, h)
 end
 
 function love.draw()
+    uiButtons = {}
+    love.graphics.setBackgroundColor(0.1, 0.1, 0.1) -- dark gray
+
+    -- =====================
+    -- MENU (SCREEN SPACE)
+    -- =====================
+    if gameState == STATE_MENU then
+        drawMainMenu()
+        return
+    end
+
+    if gameState == STATE_LOAD then
+        drawLoadMenu()
+        return
+    end
+
+
+    -- =====================
+    -- WORLD (WORLD SPACE)
+    -- =====================
     love.graphics.push()
     love.graphics.translate(camX, camY)
     love.graphics.scale(camScale)
 
-    uiButtons = {}
 
-    -- World
-    love.graphics.setBackgroundColor(0.1, 0.1, 0.1) -- dark gray
     love.graphics.setColor(0.05, 0.05, 0.05)
     drawBody(ground)
 
@@ -183,34 +247,32 @@ function love.draw()
 
     love.graphics.pop()
 
-    -- Tool UI
-    local toolName = {
-        [TOOL_SELECT] = "Select",
-        [TOOL_MOVE] = "Move",
-        [TOOL_BALL] = "Spawn Ball",
-        [TOOL_BOX] = "Spawn Box",
-        [TOOL_DRAG] = "Drag"
-    }
+    -- =====================
+    -- UI (SCREEN SPACE)
+    -- =====================
+    drawUI()
 
-    love.graphics.setColor(1, 1, 1)
-    love.graphics.print("Tool: " .. toolName[currentTool], 10, 40)
-    love.graphics.print("1-Select        2-Move        3-Ball        4-Box        5-Drag", 10, WINDOW_H - 60)
-    
-    love.graphics.print("FPS: " .. love.timer.getFPS(), 10, 10)
+    -- Saving World UI
+    if isNamingWorld then
+        -- Dark overlay
+        love.graphics.setColor(0,0,0,0.6)
+        love.graphics.rectangle("fill", 0,0, WINDOW_W, WINDOW_H)
 
-    love.graphics.print("Drag Force: " .. dragForce, 10, WINDOW_H - 80)
+        local w, h = 400, 120
+        local x = (WINDOW_W - w)/2
+        local y = (WINDOW_H - h)/2
 
-    -- Controls Panel
-    love.graphics.print("Controls", WINDOW_W - 170, 10)
-    love.graphics.print("P to Pause Time", WINDOW_W - 190, 30)
-    love.graphics.print("N and M to Increase And Decrease Drag Force", WINDOW_W - 280, 50)
-    love.graphics.print("Middle Click to pan the Camera", WINDOW_W - 240, 70)
-    love.graphics.print("Scroll Wheel to zoom in and out", WINDOW_W - 240, 90)
-    love.graphics.print("Q and E to rotate an object", WINDOW_W - 230, 110)
+        love.graphics.setColor(0.15,0.15,0.15)
+        love.graphics.rectangle("fill", x, y, w, h)
+        love.graphics.setColor(1,1,1)
+        love.graphics.rectangle("line", x, y, w, h)
 
-    -- Properties Panel
-    drawPropertiesPanel()
-    drawToolsPanel()
+        love.graphics.printf("Enter World Name:", x, y + 15, w, "center")
+
+        -- Textbox
+        love.graphics.rectangle("line", x+40, y+60, w-80, 30)
+        love.graphics.print(worldNameInput .. "_", x+50, y+65)
+    end
 
 end
 
@@ -225,8 +287,6 @@ function love.mousepressed(x, y, button)
 
     if button ~= 1 then return end
 
-    local wx, wy = screenToWorld(x, y)
-
     -- UI click FIRST (screen space)
     for _, btn in ipairs(uiButtons) do
         if x >= btn.x and x <= btn.x + btn.w and
@@ -235,6 +295,68 @@ function love.mousepressed(x, y, button)
             return
         end
     end
+
+    -- =====================
+    -- Load Menu Double Click
+    -- =====================
+    if gameState == STATE_LOAD and button == 1 then
+        local panelW = math.floor(WINDOW_W * 0.6)
+        local panelH = math.floor(WINDOW_H * 0.7)
+        local panelX = math.floor((WINDOW_W - panelW) / 2)
+        local panelY = math.floor((WINDOW_H - panelH) / 2)
+
+        local listX = panelX + 20
+        local listY = panelY + 60
+        local listW = panelW - 40
+        local rowH = 30
+        local viewH = panelH - 120
+
+        local files = {}
+
+        for _, entry in ipairs(saveCache) do
+            local name = entry.file:lower()
+            if loadSearch == "" or name:find(loadSearch:lower(), 1, true) then
+                table.insert(files, entry.file)
+            end
+        end
+
+
+        for i, file in ipairs(files) do
+            local rx = listX
+            local ry = listY + (i-1) * LOAD_ROW_HEIGHT + loadMenuScroll
+            local rw = listW
+            local rh = rowH
+
+            if x >= rx and x <= rx+rw and y >= ry and y <= ry+rh then
+                local now = love.timer.getTime()
+
+                if lastClickedFile == file and (now - lastClickTime) <= DOUBLE_CLICK_TIME then
+                    -- DOUBLE CLICK → LOAD
+                    loadWorld(SAVE_DIR .. file .. "/world.lua")
+                    currentWorldName = file
+                    autoSaveTimer = 0
+                    gameState = STATE_WORLD
+
+                    lastClickedFile = nil
+                    lastClickTime = 0
+                    return
+                else
+                    -- SINGLE CLICK (select row)
+                    lastClickedFile = file
+                    lastClickTime = now
+                    return
+                end
+            end
+        end
+
+        -- Clicked empty space → clear selection
+        lastClickedFile = nil
+        lastClickTime = 0
+    end
+
+
+    local wx, wy = screenToWorld(x, y)
+
 
     if currentTool == TOOL_SELECT then
         local obj = getObjectAtPoint(wx, wy)
@@ -270,6 +392,12 @@ function love.mousepressed(x, y, button)
         if obj then
             mouseJoint = love.physics.newMouseJoint(obj.body, wx, wy)
             mouseJoint:setMaxForce(dragForce)
+        end
+    
+    elseif currentTool == TOOL_FREEZE then
+        local obj = getObjectAtPoint(wx, wy)
+        if obj then
+            toggleFreeze(obj)
         end
     end
 
@@ -366,6 +494,13 @@ end
 function love.wheelmoved(dx, dy)
     if dy == 0 then return end
 
+    -- LOAD MENU SCROLL ONLY
+    if gameState == STATE_LOAD then
+        loadMenuScroll = loadMenuScroll + dy * 20
+        return
+    end
+
+    -- WORLD ZOOM ONLY
     local mx, my = love.mouse.getPosition()
     local wx, wy = screenToWorld(mx, my)
 
@@ -375,10 +510,10 @@ function love.wheelmoved(dx, dy)
 
     local scaleFactor = camScale / oldScale
 
-    -- Keep world point under cursor stable
     camX = mx - wx * camScale
     camY = my - wy * camScale
 end
+
 
 function love.keypressed(key)
     -- Reset Zoom
@@ -393,6 +528,7 @@ function love.keypressed(key)
     if key == "3" then currentTool = TOOL_BALL end
     if key == "4" then currentTool = TOOL_BOX end
     if key == "5" then currentTool = TOOL_DRAG end
+    if key == "6" then currentTool = TOOL_FREEZE end
 
     -- Remove Selected Objects
     if key == "delete" then
@@ -435,6 +571,63 @@ function love.keypressed(key)
             eDown = true
         end
     end
+
+    if key == "space" then
+        if not inSlowMotion then
+            timeScale = 0.4
+            inSlowMotion = true
+        else
+            timeScale = 1.0
+            inSlowMotion = false
+        end
+    end
+
+    -- Save a world
+    if key == "f5" then
+        if not currentWorldName then
+            -- First save ever → ask for name
+            isNamingWorld = true
+            worldNameInput = ""
+        else
+            -- Normal save → overwrite
+            saveWorld(SAVE_DIR .. currentWorldName)
+            autoSaveTimer = 0
+        end
+    end
+
+    -- Pause the game
+    if key == "escape" then
+        gameState = STATE_MENU
+    end
+
+    -- Saving Name Input
+    if isNamingWorld then
+        if key == "backspace" then
+            worldNameInput = worldNameInput:sub(1, -2)
+            return
+        end
+
+        if key == "return" or key == "kpenter" then
+            if worldNameInput ~= "" then
+                currentWorldName = worldNameInput
+                saveWorld(SAVE_DIR .. currentWorldName)
+                isNamingWorld = false
+            end
+            return
+        end
+
+        if key == "escape" then
+            isNamingWorld = false
+            return
+        end
+    end
+
+    if gameState == STATE_LOAD then
+        if key == "backspace" then
+            loadSearch = loadSearch:sub(1, -2)
+            return
+        end
+    end
 end
 
 function love.keyreleased(key)
@@ -446,6 +639,16 @@ function love.keyreleased(key)
     if key == "e" then
         rotateSpeed = originalRS
         eDown = false
+    end
+end
+
+function love.textinput(t)
+    if isNamingWorld then
+        worldNameInput = worldNameInput .. t
+    end
+
+    if gameState == STATE_LOAD then
+        loadSearch = loadSearch .. t
     end
 end
 
@@ -628,12 +831,19 @@ function drawButton(text, x, y, w, h, onClick, style)
     love.graphics.setColor(border)
     love.graphics.rectangle("line", x, y, w, h)
 
-    -- Text
+    -- Text (centered & pixel-perfect)
     love.graphics.setColor(textCol)
-    love.graphics.print(text, x+6, y+2)
+
+    local font = love.graphics.getFont()
+    local textW = font:getWidth(text)
+    local textH = font:getHeight()
+
+    local textX = math.floor(x + (w - textW) / 2)
+    local textY = math.floor(y + (h - textH) / 2)
+
+    love.graphics.print(text, textX, textY)
+
 end
-
-
 
 function drawPropertiesPanel()
     love.graphics.setColor(0.15,0.15,0.15)
@@ -891,6 +1101,10 @@ function drawToolsPanel()
     addToolButton("Drag", 290, ToolButtonY, TOOL_DRAG, function ()
         currentTool = TOOL_DRAG
     end)
+
+    addToolButton("Freeze", 360, ToolButtonY, TOOL_FREEZE, function ()
+        currentTool = TOOL_FREEZE
+    end)
 end
 
 function addToolButton(text, x, y, toolId, onClick)
@@ -1016,6 +1230,482 @@ function drawSelectionOutline(obj)
     love.graphics.setColor(1,1,1)
 end
 
+function drawUI()
+    -- Tool UI
+    local toolName = {
+        [TOOL_SELECT] = "Select",
+        [TOOL_MOVE] = "Move",
+        [TOOL_BALL] = "Spawn Ball",
+        [TOOL_BOX] = "Spawn Box",
+        [TOOL_DRAG] = "Drag",
+        [TOOL_FREEZE] = "Freeze"
+    }
+
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.print("Tool: " .. toolName[currentTool], 10, 40)
+    love.graphics.print("FPS: " .. love.timer.getFPS(), 10, 10)
+
+    -- Controls, slow motion, tools, properties
+    drawPropertiesPanel()
+    drawToolsPanel()
+
+    drawButton("", WINDOW_W / 2, 10, 30, 30, function ()
+        if not inSlowMotion then
+            timeScale = 0.4
+            inSlowMotion = true
+        else
+            timeScale = 1.0
+            inSlowMotion = false
+        end
+    end)
+
+    love.graphics.draw(slowMotionIcon, (WINDOW_W / 2) - 3, 10, 0, 0.03, 0.03)
+
+    -- Current world Name
+    if currentWorldName then
+        love.graphics.print("World: " .. currentWorldName, 10, 60)
+    else
+        love.graphics.print("World: (unsaved)", 10, 60)
+    end
+
+    if currentWorldName then
+        local t = math.floor(AUTO_SAVE_INTERVAL - autoSaveTimer)
+        love.graphics.print("Auto-save in: " .. t .. "s", 10, 80)
+    end
+
+end
+
+function drawMainMenu()
+    love.graphics.setBackgroundColor(0.05, 0.05, 0.08)
+
+    local cx = WINDOW_W / 2
+    local y = 200
+
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf("PHYSICS PLAYGROUND", 0, 100, WINDOW_W, "center")
+
+    drawButton("New World", cx - 100, y, 200, 40, function()
+        resetWorld()
+        currentWorldName = nil
+        autoSaveTimer = 0
+        gameState = STATE_WORLD
+    end)
+
+    y = y + 60
+
+    drawButton("Load World", cx - 100, y, 200, 40, function()
+        refreshSaveCache()
+        loadSearch = ""
+        loadMenuScroll = 0
+        gameState = STATE_LOAD
+    end)
+
+    y = y + 60
+
+    drawButton("Quit", cx - 100, y, 200, 40, function()
+        love.event.quit()
+    end)
+end
+
+function drawLoadMenu()
+    local panelW = math.floor(WINDOW_W * 0.6)
+    local panelH = math.floor(WINDOW_H * 0.7)
+    local panelX = math.floor((WINDOW_W - panelW) / 2)
+    local panelY = math.floor((WINDOW_H - panelH) / 2)
+
+    -- Panel BG
+    love.graphics.setColor(0.12, 0.12, 0.12)
+    love.graphics.rectangle("fill", panelX, panelY, panelW, panelH)
+    love.graphics.setColor(1,1,1)
+    love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
+
+    -- Title
+    local title = "Load World"
+    local font = love.graphics.getFont()
+    local titleW = font:getWidth(title)
+    local titleX = math.floor(panelX + (panelW - titleW) / 2)
+    local titleY = math.floor(panelY - 20)
+
+    love.graphics.print(title, titleX, titleY)
+
+
+    -- Search bar
+    love.graphics.print("Search:", panelX + 120, panelY + 15)
+    love.graphics.rectangle("line", panelX + 180, panelY + 12, 200, 24)
+    love.graphics.print(loadSearch .. "_", panelX + 185, panelY + 16)
+
+
+    -- Back Button
+    drawButton("Back", panelX + 10, panelY + 10, 80, 28, function()
+        gameState = STATE_MENU
+    end)
+
+    local filtered = {}
+
+    for _, entry in ipairs(saveCache) do
+        local name = entry.file:lower()
+        if loadSearch == "" or name:find(loadSearch:lower(), 1, true) then
+            table.insert(filtered, entry)
+        end
+    end
+
+
+    local totalH = #filtered * LOAD_ROW_HEIGHT
+    local viewH = panelH - 120
+
+    if totalH < viewH then
+        loadMenuScroll = 0
+    else
+        loadMenuScroll = math.max(viewH - totalH, math.min(0, loadMenuScroll))
+    end
+
+    local listX = panelX + 20
+    local listY = panelY + 60
+    local listW = panelW - 40
+    local rowH = 30
+
+    for i, entry in ipairs(filtered) do
+        local file = entry.file
+        local meta = entry.meta
+        local x = listX
+        local y = listY + (i-1) * LOAD_ROW_HEIGHT + loadMenuScroll
+        local w = listW
+        local h = rowH
+
+        local mx, my = love.mouse.getPosition()
+        local hovered = mx >= x and mx <= x+w and my >= y and my <= y+h
+
+        if y + rowH >= listY and y <= listY + viewH then
+            -- Row hover
+            if hovered then
+                love.graphics.setColor(0.22, 0.22, 0.22)
+                love.graphics.rectangle("fill", x, y, w, h)
+            end
+
+            love.graphics.setColor(1,1,1)
+            love.graphics.print(meta.name or file, x + 8, y + 4)
+
+            local info = string.format(
+                "Objects: %d   Modified: %s",
+                meta.objectCount or 0,
+                meta.modified and os.date("%Y-%m-%d %H:%M", meta.modified) or "?"
+            )
+
+            love.graphics.setColor(0.7,0.7,0.7)
+            love.graphics.print(info, x + 8, y + 16)
+            love.graphics.setColor(1,1,1)
+
+            -- Delete button on hover
+            if hovered then
+                drawButton("Delete", x + w - 70, y, 70, h, function()
+                    deleteWorld(file)
+                end, { theme = "danger" })
+            end
+        end
+    end
+
+    if #filtered == 0 then
+        love.graphics.print("No saves found.", listX, listY)
+    end
+end
+
+
+function saveWorld(worldName)
+    if not worldName then
+        print("saveWorld called with nil worldName")
+        return
+    end
+
+    worldName = sanitizeWorldName(worldName)
+    currentWorldName = worldName
+
+    local worldDir = getWorldDir(worldName)
+    love.filesystem.createDirectory(worldDir)
+
+    local worldPath = worldDir .. "world.lua"
+    local metaPath  = worldDir .. "meta.lua"
+
+    local objects = {}
+
+    for _, obj in ipairs(bodies) do
+        local vx, vy = obj.body:getLinearVelocity()
+
+        local entry = {
+            type = obj.shape:typeOf("CircleShape") and "ball" or "box",
+            x = obj.body:getX(),
+            y = obj.body:getY(),
+            angle = obj.body:getAngle(),
+            vx = vx,
+            vy = vy,
+            av = obj.body:getAngularVelocity(),
+
+            color = { obj.color[1], obj.color[2], obj.color[3] },
+
+            restitution = obj.fixture:getRestitution(),
+            friction    = obj.fixture:getFriction(),
+            density     = obj.fixture:getDensity(),
+
+            frozen = obj.frozen == true
+        }
+
+        if entry.type == "ball" then
+            entry.radius = obj.shape:getRadius()
+        else
+            local pts = { obj.shape:getPoints() }
+            entry.w = math.abs(pts[3] - pts[1])
+            entry.h = math.abs(pts[6] - pts[2])
+        end
+
+        table.insert(objects, entry)
+    end
+
+    -- Write world.lua
+    local worldChunk = "return { objects = " .. tableToString(objects) .. " }"
+    love.filesystem.write(worldPath, worldChunk)
+
+    -- Load old meta if exists (to preserve created time)
+    local createdTime = os.time()
+    if love.filesystem.getInfo(metaPath) then
+        local ok, oldChunk = pcall(love.filesystem.load, metaPath)
+        if ok and oldChunk then
+            local old = oldChunk()
+            if old and old.created then
+                createdTime = old.created
+            end
+        end
+    end
+
+    -- Write meta.lua
+    local meta = {
+        name = worldName,
+        created = createdTime,
+        modified = os.time(),
+        objectCount = #bodies,
+        playtime = 0
+    }
+
+    local metaChunk = "return " .. tableToString(meta)
+    love.filesystem.write(metaPath, metaChunk)
+
+    print("World saved:", worldDir)
+end
+
+function loadWorld(worldPath)
+    if not love.filesystem.getInfo(worldPath) then
+        print("No save file:", worldPath)
+        return
+    end
+
+    clearWorld()
+
+    local ok, chunk = pcall(love.filesystem.load, worldPath)
+    if not ok or not chunk then
+        print("Failed to load world chunk:", worldPath)
+        return
+    end
+
+    local ok2, data = pcall(chunk)
+    if not ok2 or not data or not data.objects then
+        print("Invalid world data:", worldPath)
+        return
+    end
+
+    for _, entry in ipairs(data.objects) do
+        local obj
+
+        if entry.type == "ball" then
+            spawnBall(entry.x, entry.y, entry.radius)
+            obj = bodies[#bodies]
+        else
+            spawnBox(entry.x, entry.y, entry.w, entry.h)
+            obj = bodies[#bodies]
+        end
+
+        obj.body:setAngle(entry.angle or 0)
+        obj.body:setLinearVelocity(entry.vx or 0, entry.vy or 0)
+        obj.body:setAngularVelocity(entry.av or 0)
+
+        obj.color = entry.color or {1,1,1}
+
+        obj.fixture:setRestitution(entry.restitution or 0.2)
+        obj.fixture:setFriction(entry.friction or 0.8)
+        setObjectDensity(obj, entry.density or 1.0)
+
+        if entry.frozen then
+            obj.frozen = true
+            obj.body:setType("static")
+            obj.originalType = "static"
+        end
+    end
+
+    clearAllSelection()
+
+    print("World loaded:", worldPath)
+end
+
+function clearWorld()
+    for _, obj in ipairs(bodies) do
+        if obj.body then
+            obj.body:destroy()
+        end
+    end
+    bodies = {}
+    selectedObjects = {}
+end
+
+function resetWorld()
+    -- Clear old physics + objects
+    clearWorld()
+
+    -- Recreate physics world
+    love.physics.setMeter(64)
+    world = love.physics.newWorld(0, 9.81 * 64, true)
+
+    -- Reset lists
+    bodies = {}
+    selectedObjects = {}
+
+    -- Reset save name
+    currentWorldName = nil
+    autoSaveTimer = 0
+
+    -- Reset tools/state
+    currentTool = TOOL_SELECT
+    mouseJoint = nil
+    dragging = false
+    selecting = false
+
+    -- Reset camera
+    camX, camY = 0, 0
+    camScale = 1
+
+    -- Recreate ground
+    ground = {}
+    ground.body = love.physics.newBody(world, 400, 2550, "static")
+    ground.shape = love.physics.newRectangleShape(80000, 4000)
+    ground.fixture = love.physics.newFixture(ground.body, ground.shape)
+end
+
+function getWorldDir(worldName)
+    worldName = sanitizeWorldName(worldName)
+    return SAVE_DIR .. worldName .. "/"
+end
+
+function deleteWorld(worldName)
+    worldName = sanitizeWorldName(worldName)
+    local dir = getWorldDir(worldName)
+
+    if not love.filesystem.getInfo(dir) then
+        print("World folder not found:", dir)
+        return
+    end
+
+    -- delete files inside
+    love.filesystem.remove(dir .. "world.lua")
+    love.filesystem.remove(dir .. "meta.lua")
+
+    -- remove folder
+    love.filesystem.remove(dir)
+
+    print("Deleted world:", worldName)
+
+    refreshSaveCache()
+end
+
+function tableToString(t, indent)
+    indent = indent or 0
+    local s = "{\n"
+
+    for k, v in pairs(t) do
+        local key
+        if type(k) == "number" then
+            key = ""
+        else
+            key = tostring(k) .. " = "
+        end
+
+        s = s .. string.rep(" ", indent + 2) .. key
+
+        if type(v) == "table" then
+            s = s .. tableToString(v, indent + 2)
+        elseif type(v) == "string" then
+            s = s .. string.format("%q", v)
+        else
+            s = s .. tostring(v)
+        end
+
+        s = s .. ",\n"
+    end
+
+    s = s .. string.rep(" ", indent) .. "}"
+    return s
+end
+
+function getSaveFiles()
+    local files = love.filesystem.getDirectoryItems(SAVE_DIR)
+    local saves = {}
+
+    for _, file in ipairs(files) do
+        if file:match("%.lua$") then
+            table.insert(saves, file)
+        end
+    end
+
+    return saves
+end
+
+function refreshSaveCache()
+    saveCache = {}
+
+    local folders = love.filesystem.getDirectoryItems(SAVE_DIR)
+
+    for _, folder in ipairs(folders) do
+        local worldPath = SAVE_DIR .. folder .. "/world.lua"
+        local metaPath  = SAVE_DIR .. folder .. "/meta.lua"
+
+        if love.filesystem.getInfo(worldPath) then
+            local meta = {
+                name = folder,
+                modified = 0,
+                objectCount = 0
+            }
+
+            if love.filesystem.getInfo(metaPath) then
+                local ok, chunk = pcall(love.filesystem.load, metaPath)
+                if ok and chunk then
+                    local ok2, data = pcall(chunk)
+                    if ok2 and type(data) == "table" then
+                        meta = data
+                    end
+                end
+            end
+
+            table.insert(saveCache, {
+                file = folder,   -- folder name
+                meta = meta
+            })
+        end
+    end
+
+    table.sort(saveCache, function(a,b)
+        return (a.meta.modified or 0) > (b.meta.modified or 0)
+    end)
+end
+
+function sanitizeWorldName(name)
+    if not name then return "World" end
+
+    -- remove any slashes or folders
+    name = name:gsub("[/\\]", "")
+    name = name:gsub("^saves", "")
+    name = name:gsub("^SAVE", "")
+
+    if name == "" then
+        name = "World"
+    end
+
+    return name
+end
 
 function toggleFreeze(obj)
     if obj.frozen then
