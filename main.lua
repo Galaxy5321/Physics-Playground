@@ -76,7 +76,7 @@ function love.load()
     -- Camera Zoom
     camScale = 1
     ZOOM_MIN = 0.25
-    ZOOM_MAX = 3
+    ZOOM_MAX = 5
     ZOOM_SPEED = 0.1
 
     timeScale = 1
@@ -605,7 +605,7 @@ function love.wheelmoved(dx, dy)
 
         if shift then
             magnetStrength = magnetStrength + dy * strengthStep
-            magnetStrength = math.max(0, math.min(80000, magnetStrength))
+            magnetStrength = math.max(0, math.min(800000, magnetStrength))
             return
         end
 
@@ -1205,7 +1205,7 @@ function drawPropertiesPanel()
         drawButton("-", x+w-90, cy, 22, 22, function()
             forAllSelected(function(obj)
                 local v = getter(obj) - step
-                if not outLimits and minVal then v = math.max(minVal, v) end
+                if minVal then v = math.max(minVal, v) end
                 setter(obj, v)
             end)
         end)
