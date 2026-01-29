@@ -1,5 +1,6 @@
 function love.load()
     WINDOW_W, WINDOW_H = 1000, 700
+    fullscreen = false
     DT = 0
 
     love.window.setMode(WINDOW_W, WINDOW_H, {
@@ -39,7 +40,7 @@ function love.load()
     magnetRadius = 150
     magnetMode = "attract" -- or "repel"
 
-    rotateSpeed = 15 * 10000
+    rotateSpeed = 10 * 10000
     originalRS = rotateSpeed
     qDown = false
     eDown = false
@@ -75,8 +76,8 @@ function love.load()
 
     -- Camera Zoom
     camScale = 1
-    ZOOM_MIN = 0.25
-    ZOOM_MAX = 5
+    ZOOM_MIN = 0.10
+    ZOOM_MAX = 3
     ZOOM_SPEED = 0.1
 
     timeScale = 1
@@ -91,8 +92,29 @@ function love.load()
     STATE_MENU = "menu"
     STATE_WORLD = "world"
     STATE_LOAD = "load"
+    STATE_SETTINGS = "settings"
 
     gameState = STATE_MENU
+
+    settings = {
+        -- Audio
+        masterVolume = 1.0,
+
+        -- Display
+        fullscreen = false,
+        vsync = true,
+
+        -- Editor
+        showGrid = true,
+        autoSaveInterval = 120,
+
+        -- Grid tuning
+        gridSize = 64,
+        gridFadeZoom = 0.15,
+    }
+
+
+    SETTINGS_FILE = "settings.lua"
     
     SAVE_DIR = "saves/"
     love.filesystem.createDirectory(SAVE_DIR)
@@ -104,6 +126,10 @@ function love.load()
 
     AUTO_SAVE_INTERVAL = 60 -- seconds
     autoSaveTimer = 0
+
+    -- Grid stuff
+    GRID_SIZE = 32
+    GRID_COLOR = {1,1,1,0.08}
 
     -- Load Menu stuff
     loadMenuScroll = 0
@@ -131,6 +157,16 @@ function love.load()
     ground.body = love.physics.newBody(world, 400, 2550, "static")
     ground.shape = love.physics.newRectangleShape(80000, 4000)
     ground.fixture = love.physics.newFixture(ground.body, ground.shape)
+
+    -- Functions that run on start
+    loadSettings()
+
+    love.audio.setVolume(settings.masterVolume or 1)
+    love.window.setFullscreen(settings.fullscreen or false)
+    love.window.setVSync(settings.vsync and 1 or 0)
+
+    AUTO_SAVE_INTERVAL = settings.autoSaveInterval or 120
+
 end
 
 function love.update(dt)
@@ -230,6 +266,10 @@ function love.draw()
         return
     end
 
+    if gameState == STATE_SETTINGS then
+        drawSettingsMenu()
+        return
+    end
 
     -- =====================
     -- WORLD (WORLD SPACE)
@@ -238,6 +278,9 @@ function love.draw()
     love.graphics.translate(camX, camY)
     love.graphics.scale(camScale)
 
+    
+    drawGrid()
+    
 
     love.graphics.setColor(0.05, 0.05, 0.05)
     drawBody(ground)
@@ -686,6 +729,17 @@ function love.keypressed(key)
         end
     end
 
+    -- Toggle Fullscreen
+    if key == "f11" then
+        if not fullscreen then
+            love.window.setFullscreen(true)
+            fullscreen = true
+        else
+            love.window.setFullscreen(false)
+            fullscreen = false
+        end
+    end
+
     -- Rotate selected objects with Q / E
     if #selectedObjects > 0 then
         if key == "q" then
@@ -759,7 +813,6 @@ function love.keypressed(key)
             hexColorInput = hexColorInput:sub(1, -2)
         end
     end
-
 end
 
 function love.keyreleased(key)
@@ -1071,6 +1124,38 @@ end
 
 function isMultiSelected()
     return #selectedObjects > 1
+end
+
+function drawSliderRow(label, x, y, w, value, min, max, onChange)
+    local mx, my = love.mouse.getPosition()
+    local hovered = mx >= x and mx <= x+w and my >= y and my <= y+26
+
+    -- BG
+    love.graphics.setColor(0.12,0.12,0.16)
+    love.graphics.rectangle("fill", x, y, w, 26, 4, 4)
+
+    -- Fill
+    local t = (value - min) / (max - min)
+    t = math.max(0, math.min(1, t))
+
+    love.graphics.setColor(0.25, 0.45, 0.9, 0.6)
+    love.graphics.rectangle("fill", x, y, w * t, 26, 4, 4)
+
+    -- Label + value
+    love.graphics.setColor(1,1,1)
+    love.graphics.print(label, x+8, y+5)
+
+    local txt = string.format("%.2f", value)
+    local tw = love.graphics.getFont():getWidth(txt)
+    love.graphics.print(txt, x+w-tw-8, y+5)
+
+    -- Drag logic
+    if hovered and love.mouse.isDown(1) then
+        local nx = (mx - x) / w
+        nx = math.max(0, math.min(1, nx))
+        local v = min + nx * (max - min)
+        onChange(v)
+    end
 end
 
 function drawPropertiesPanel()
@@ -1624,7 +1709,7 @@ function drawMainMenu()
 
     -- ===== Main Card Panel =====
     local panelW = 420
-    local panelH = 420
+    local panelH = 500
     local panelX = cx - panelW / 2
     local panelY = cy - panelH / 2
 
@@ -1670,6 +1755,12 @@ function drawMainMenu()
 
     y = y + 65
 
+    drawButton("Settings", btnX, y, btnW, btnH, function()
+        gameState = STATE_SETTINGS
+    end)
+
+    y = y + 65
+
     drawButton("Quit", btnX, y, btnW, btnH, function()
         love.event.quit()
     end, { theme = "danger" })
@@ -1683,7 +1774,7 @@ function drawMainMenu()
 
     -- Version / Build tag (feels pro)
     love.graphics.setColor(0.4, 0.4, 0.4)
-    love.graphics.print("v0.8", panelX + 10, panelY + panelH - 20)
+    love.graphics.print("v0.82", panelX + 10, panelY + panelH - 20)
 end
 
 function drawLoadMenu()
@@ -1715,6 +1806,7 @@ function drawLoadMenu()
 
     -- ===== Back Button =====
     drawButton("Back", panelX + 20, panelY + 20, 80, 28, function()
+        saveSettings()
         gameState = STATE_MENU
     end)
 
@@ -1829,6 +1921,134 @@ function drawLoadMenu()
     end
 end
 
+function drawSettingsMenu()
+    love.graphics.setBackgroundColor(0.05, 0.05, 0.08)
+
+    local cx = WINDOW_W / 2
+    local y = 160
+
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf("SETTINGS", 0, 80, WINDOW_W, "center")
+
+    -- Main panel
+    local pw, ph = 420, 410
+    local px = cx - pw/2
+    local py = y
+
+    drawPanel(px, py, pw, ph)
+
+    local cy = py + 20
+
+    drawSectionHeader("Audio", px+20, cy, pw-40)
+    cy = cy + 30
+
+    drawSliderRow("Master Volume", px+20, cy, pw-40,
+        settings.masterVolume, 0, 1,
+        function(v)
+            settings.masterVolume = v
+            love.audio.setVolume(v)
+            saveSettings()
+        end)
+    cy = cy + 40
+
+    drawDividerSoft(px+20, cy, pw-40)
+    cy = cy + 20
+
+    drawSectionHeader("Display", px+20, cy, pw-40)
+    cy = cy + 30
+
+    drawToggleButton("Fullscreen", px+20, cy, pw-40, 26,
+        settings.fullscreen, function(v)
+            settings.fullscreen = v
+            love.window.setFullscreen(v)
+            saveSettings()
+        end)
+    cy = cy + 36
+
+    drawToggleButton("VSync", px+20, cy, pw-40, 26,
+        settings.vsync, function(v)
+            settings.vsync = v
+            love.window.setVSync(v and 1 or 0)
+            saveSettings()
+        end)
+    cy = cy + 36
+
+    drawDividerSoft(px+20, cy, pw-40)
+    cy = cy + 20
+
+    drawSectionHeader("Editor", px+20, cy, pw-40)
+    cy = cy + 30
+
+    drawToggleButton("Show Grid", px+20, cy, pw-40, 26,
+        settings.showGrid, function(v)
+            settings.showGrid = v
+            saveSettings()
+        end)
+    cy = cy + 36
+
+    drawSliderRow("Auto save Interval", px+20, cy, pw-40,
+        settings.autoSaveInterval, 10, 600,
+        function(v)
+            settings.autoSaveInterval = v
+            AUTO_SAVE_INTERVAL = settings.autoSaveInterval
+            saveSettings()
+        end)
+
+    drawDividerSoft(px+20, cy, pw-40)
+    cy = cy + 20
+
+    drawButton("Back", cx - 80, py + ph - 50, 160, 32, function()
+        gameState = STATE_MENU
+    end)
+end
+
+function drawGrid()
+    if not settings.showGrid then return end
+
+    local scale = camScale
+    local base = GRID_SIZE
+
+    -- Fade out when zoomed far out
+    if scale < 0.15 then
+        return
+    end
+
+    -- Adaptive spacing (world units)
+    local spacing = base
+
+    local w = love.graphics.getWidth() / scale
+    local h = love.graphics.getHeight() / scale
+
+    -- Camera top-left in WORLD space
+    local worldLeft = (-camX / scale) + 10
+    local worldTop  = -camY / scale
+
+    -- First grid lines in world space
+    local startX = math.floor(worldLeft / spacing) * spacing
+    local startY = math.floor(worldTop  / spacing) * spacing
+
+    love.graphics.setColor(GRID_COLOR)
+
+    local maxLines = 300
+
+    -- Vertical (WORLD space)
+    local count = 0
+    for gx = startX, startX + w, spacing do
+        love.graphics.line(gx, worldTop, gx, worldTop + h)
+        count = count + 1
+        if count > maxLines then break end
+    end
+
+    -- Horizontal (WORLD space)
+    count = 0
+    for gy = startY, startY + h, spacing do
+        love.graphics.line(worldLeft, gy, worldLeft + w, gy)
+        count = count + 1
+        if count > maxLines then break end
+    end
+
+    love.graphics.setColor(1,1,1,1)
+end
 
 function saveWorld(worldName)
     if not worldName then
@@ -2112,6 +2332,39 @@ function refreshSaveCache()
     end)
 end
 
+function saveSettings()
+    local data = "return {\n"
+    for k, v in pairs(settings) do
+        if type(v) == "string" then
+            data = data .. string.format('  %s = "%s",\n', k, v)
+        else
+            data = data .. string.format('  %s = %s,\n', k, tostring(v))
+        end
+    end
+    data = data .. "}\n"
+
+    love.filesystem.write(SETTINGS_FILE, data)
+    print("[Settings] Saved")
+end
+
+function loadSettings()
+    if not love.filesystem.getInfo(SETTINGS_FILE) then
+        print("[Settings] No settings file, using defaults")
+        return
+    end
+
+    local chunk = love.filesystem.load(SETTINGS_FILE)
+    local loaded = chunk()
+
+    if type(loaded) == "table" then
+        for k, v in pairs(loaded) do
+            settings[k] = v
+        end
+        print("[Settings] Loaded")
+    end
+end
+
+
 function sanitizeWorldName(name)
     if not name then return "World" end
 
@@ -2126,6 +2379,7 @@ function sanitizeWorldName(name)
 
     return name
 end
+
 
 function toggleFreeze(obj)
     if obj.frozen then
