@@ -1,5 +1,5 @@
 function love.load()
-    WINDOW_W, WINDOW_H = 1000, 700
+    WINDOW_W, WINDOW_H = 1280, 720
     fullscreen = false
     DT = 0
 
@@ -113,6 +113,8 @@ function love.load()
         gridFadeZoom = 0.15,
     }
 
+    activeNumberInput = nil   -- id string
+    numberInputText = ""
 
     SETTINGS_FILE = "settings.lua"
     
@@ -147,6 +149,15 @@ function love.load()
 
     uiConsumedClick = false
 
+    -- Main menu stuff
+    menuWorld = nil
+    menuObjects = {}
+    menuSpawnTimer = 0
+
+    -- Particles
+    impactParticles = {}
+
+
     love.physics.setMeter(64)
     world = love.physics.newWorld(0, 9.81 * 64, true)
 
@@ -160,6 +171,7 @@ function love.load()
 
     -- Functions that run on start
     loadSettings()
+    initMenuWorld()
 
     love.audio.setVolume(settings.masterVolume or 1)
     love.window.setFullscreen(settings.fullscreen or false)
@@ -167,6 +179,7 @@ function love.load()
 
     AUTO_SAVE_INTERVAL = settings.autoSaveInterval or 120
 
+    world:setCallbacks(beginContact, endContact, preSolve, postSolve)
 end
 
 function love.update(dt)
@@ -237,6 +250,37 @@ function love.update(dt)
 
                 obj.body:applyForce(nx * force, ny * force)
             end
+        end
+    end
+
+    if gameState == STATE_MENU and menuWorld then
+        menuWorld:update(dt)
+
+        menuSpawnTimer = menuSpawnTimer - dt
+        if menuSpawnTimer <= 0 then
+            spawnMenuObject()
+            menuSpawnTimer = 0.4
+        end
+    end
+
+    local PARTICLE_GRAVITY = 1400
+
+    for i = #impactParticles, 1, -1 do
+        local p = impactParticles[i]
+
+        -- Gravity
+        p.vy = p.vy + PARTICLE_GRAVITY * scaledDt
+
+        -- Move
+        p.x = p.x + p.vx * scaledDt
+        p.y = p.y + p.vy * scaledDt
+
+        -- Fade
+        p.life = p.life - scaledDt
+        p.alpha = math.max(0, p.life)
+
+        if p.life <= 0 then
+            table.remove(impactParticles, i)
         end
     end
 
@@ -347,6 +391,15 @@ function love.draw()
             love.graphics.circle("line", cx, cy, radius)
         end
     end
+
+    for _, p in ipairs(impactParticles) do
+        local r = p.radius or 3  -- fallback radius
+
+        love.graphics.setColor(1,1,1, p.alpha and (p.alpha * 0.6) or 0.6)
+        love.graphics.circle("fill", p.x, p.y, r)
+    end
+    love.graphics.setColor(1,1,1,1)
+
 
     love.graphics.pop()
 
@@ -777,6 +830,7 @@ function love.keypressed(key)
     -- Pause the game
     if key == "escape" then
         gameState = STATE_MENU
+        initMenuWorld()
     end
 
     -- Saving Name Input
@@ -813,6 +867,17 @@ function love.keypressed(key)
             hexColorInput = hexColorInput:sub(1, -2)
         end
     end
+
+    -- Slider Textbox
+    if activeNumberInput then
+        if key == "backspace" then
+            numberInputText = numberInputText:sub(1, -2)
+        elseif key == "return" or key == "kpenter" then
+            -- confirm handled in slider draw
+        elseif key == "escape" then
+            activeNumberInput = nil
+        end
+    end
 end
 
 function love.keyreleased(key)
@@ -842,6 +907,38 @@ function love.textinput(t)
         end
     end
 
+    if activeNumberInput then
+        if t:match("[%d%.%-]") then
+            numberInputText = numberInputText .. t
+        end
+    end
+end
+
+function beginContact(a, b, coll)
+    -- optional
+end
+
+function postSolve(a, b, coll, normalImpulse, tangentImpulse)
+    if normalImpulse < 500 then return end
+
+    local x1, y1, x2, y2 = coll:getPositions()
+    local x, y
+
+    -- Pick a valid contact point
+    if x1 and y1 then
+        x, y = x1, y1
+    elseif x2 and y2 then
+        x, y = x2, y2
+    else
+        return -- no valid position
+    end
+
+    local nx, ny = coll:getNormal()
+
+    -- Normalize impulse to a sane 0.5 - 2.0 range
+    local power = math.min(normalImpulse / 800, 2)
+
+    spawnImpactParticles(x, y, nx, ny, power)
 end
 
 -- =========================
@@ -1126,35 +1223,83 @@ function isMultiSelected()
     return #selectedObjects > 1
 end
 
-function drawSliderRow(label, x, y, w, value, min, max, onChange)
+function drawSliderRow(label, x, y, w, value, min, max, onChange, id)
     local mx, my = love.mouse.getPosition()
-    local hovered = mx >= x and mx <= x+w and my >= y and my <= y+26
 
-    -- BG
-    love.graphics.setColor(0.12,0.12,0.16)
-    love.graphics.rectangle("fill", x, y, w, 26, 4, 4)
+    local rowH = 26
+    local sliderY = y + 14
+    local sliderH = 6
+    local sliderX = x
+    local sliderW = w - 80
 
-    -- Fill
+    -- Slider background
+    love.graphics.setColor(0.15,0.15,0.18)
+    love.graphics.rectangle("fill", sliderX, sliderY, sliderW, sliderH, 3,3)
+
+    -- Slider fill
     local t = (value - min) / (max - min)
     t = math.max(0, math.min(1, t))
 
-    love.graphics.setColor(0.25, 0.45, 0.9, 0.6)
-    love.graphics.rectangle("fill", x, y, w * t, 26, 4, 4)
+    love.graphics.setColor(0.3,0.5,0.9)
+    love.graphics.rectangle("fill", sliderX, sliderY, sliderW * t, sliderH, 3,3)
 
-    -- Label + value
+    -- Dragging
+    if love.mouse.isDown(1) and
+       mx >= sliderX and mx <= sliderX + sliderW and
+       my >= sliderY - 6 and my <= sliderY + sliderH + 6 and
+       activeNumberInput == nil then
+
+        local nt = (mx - sliderX) / sliderW
+        local nv = min + nt * (max - min)
+        onChange(nv)
+    end
+
+    -- Label
     love.graphics.setColor(1,1,1)
-    love.graphics.print(label, x+8, y+5)
+    love.graphics.print(label, x, y - 2)
 
-    local txt = string.format("%.2f", value)
-    local tw = love.graphics.getFont():getWidth(txt)
-    love.graphics.print(txt, x+w-tw-8, y+5)
+    -- ===== VALUE BOX (CLICK TO TYPE) =====
+    local valueBoxX = x + w - 70
+    local valueBoxW = 70
 
-    -- Drag logic
-    if hovered and love.mouse.isDown(1) then
-        local nx = (mx - x) / w
-        nx = math.max(0, math.min(1, nx))
-        local v = min + nx * (max - min)
-        onChange(v)
+    local hoveredValue =
+        mx >= valueBoxX and mx <= valueBoxX + valueBoxW and
+        my >= y - 2 and my <= y + rowH
+
+    local isActive = activeNumberInput == id
+
+    -- Box
+    if isActive then
+        love.graphics.setColor(0.2,0.3,0.6)
+    elseif hoveredValue then
+        love.graphics.setColor(0.2,0.2,0.25)
+    else
+        love.graphics.setColor(0.12,0.12,0.15)
+    end
+
+    love.graphics.rectangle("fill", valueBoxX, y - 2, valueBoxW, rowH, 4,4)
+    love.graphics.setColor(1,1,1,0.3)
+    love.graphics.rectangle("line", valueBoxX, y - 2, valueBoxW, rowH, 4,4)
+
+    -- Click to activate
+    if hoveredValue and love.mouse.isDown(1) and not isActive then
+        activeNumberInput = id
+        numberInputText = tostring(math.floor(value * 100) / 100)
+    end
+
+    -- Text
+    love.graphics.setColor(1,1,1)
+    local displayText = isActive and numberInputText or string.format("%.2f", value)
+    love.graphics.printf(displayText, valueBoxX, y + 3, valueBoxW, "center")
+
+    -- Confirm enter
+    if isActive and (love.keyboard.isDown("return") or love.keyboard.isDown("kpenter")) then
+        local num = tonumber(numberInputText)
+        if num then
+            num = math.max(min, math.min(max, num))
+            onChange(num)
+        end
+        activeNumberInput = nil
     end
 end
 
@@ -1265,6 +1410,16 @@ function drawPropertiesPanel()
     -- =====================
     drawSection("Physics")
 
+    local function getPrecision(step)
+        if love.keyboard.isDown("lshift", "rshift") then
+            return 0.01
+        elseif love.keyboard.isDown("lctrl", "rctrl") then
+            return step * 10
+        else
+            return step
+        end
+    end
+
     local function drawStepper(label, getter, setter, step, minVal, maxVal)
         -- Row background
         love.graphics.setColor(0.11, 0.11, 0.15)
@@ -1288,17 +1443,22 @@ function drawPropertiesPanel()
 
         -- Minus
         drawButton("-", x+w-90, cy, 22, 22, function()
+            local precision = getPrecision(step)
+
             forAllSelected(function(obj)
-                local v = getter(obj) - step
+                local v = getter(obj) - precision
                 if minVal then v = math.max(minVal, v) end
                 setter(obj, v)
             end)
         end)
 
+
         -- Plus
         drawButton("+", x+w-60, cy, 22, 22, function()
+            local precision = getPrecision(step)
+
             forAllSelected(function(obj)
-                local v = getter(obj) + step
+                local v = getter(obj) + precision
                 if not outLimits and maxVal then v = math.min(maxVal, v) end
                 setter(obj, v)
             end)
@@ -1306,7 +1466,6 @@ function drawPropertiesPanel()
 
         cy = cy + 28
     end
-
 
     drawStepper("Bounce",
         function(o) return o.fixture:getRestitution() end,
@@ -1321,7 +1480,7 @@ function drawPropertiesPanel()
     drawStepper("Density",
         function(o) return o.fixture:getDensity() end,
         function(o,v) setObjectDensity(o,v) end,
-        0.2, 0.1, nil)
+        0.1, 0.1, nil)
 
     cy = cy + 10
     drawDivider()
@@ -1707,13 +1866,37 @@ function drawMainMenu()
     local cx = WINDOW_W / 2
     local cy = WINDOW_H / 2
 
+    -- Draw physics background
+    for _, obj in ipairs(menuObjects) do
+        love.graphics.setColor(obj.color)
+        love.graphics.push()
+        love.graphics.translate(obj.body:getX(), obj.body:getY())
+        love.graphics.rotate(obj.body:getAngle())
+
+        if obj.shape:typeOf("CircleShape") then
+            love.graphics.circle("fill", 0, 0, obj.shape:getRadius())
+        else
+            love.graphics.polygon("fill", obj.shape:getPoints())
+        end
+
+        love.graphics.pop()
+    end
+
+    love.graphics.setColor(1,1,1)
+
+    -- Dark overlay so UI pops
+    love.graphics.setColor(0,0,0,0.35)
+    love.graphics.rectangle("fill", 0, 0, WINDOW_W, WINDOW_H)
+    love.graphics.setColor(1,1,1)
+
+
     -- ===== Main Card Panel =====
     local panelW = 420
     local panelH = 500
     local panelX = cx - panelW / 2
     local panelY = cy - panelH / 2
 
-    love.graphics.setColor(0.12, 0.12, 0.16)
+    love.graphics.setColor(0.12, 0.12, 0.16, 0.92)
     love.graphics.rectangle("fill", panelX, panelY, panelW, panelH, 8, 8)
 
     love.graphics.setColor(1,1,1)
@@ -1774,7 +1957,7 @@ function drawMainMenu()
 
     -- Version / Build tag (feels pro)
     love.graphics.setColor(0.4, 0.4, 0.4)
-    love.graphics.print("v0.82", panelX + 10, panelY + panelH - 20)
+    love.graphics.print("v0.9", panelX + 10, panelY + panelH - 20)
 end
 
 function drawLoadMenu()
@@ -1808,6 +1991,7 @@ function drawLoadMenu()
     drawButton("Back", panelX + 20, panelY + 20, 80, 28, function()
         saveSettings()
         gameState = STATE_MENU
+        initMenuWorld()
     end)
 
     -- ===== Search Bar =====
@@ -1948,7 +2132,7 @@ function drawSettingsMenu()
             settings.masterVolume = v
             love.audio.setVolume(v)
             saveSettings()
-        end)
+        end, "mastervolume")
     cy = cy + 40
 
     drawDividerSoft(px+20, cy, pw-40)
@@ -1992,13 +2176,14 @@ function drawSettingsMenu()
             settings.autoSaveInterval = v
             AUTO_SAVE_INTERVAL = settings.autoSaveInterval
             saveSettings()
-        end)
+        end, "autosave")
 
     drawDividerSoft(px+20, cy, pw-40)
     cy = cy + 20
 
     drawButton("Back", cx - 80, py + ph - 50, 160, 32, function()
         gameState = STATE_MENU
+        initMenuWorld()
     end)
 end
 
@@ -2048,6 +2233,81 @@ function drawGrid()
     end
 
     love.graphics.setColor(1,1,1,1)
+end
+
+function spawnMenuObject()
+    local x = math.random(50, WINDOW_W-50)
+    local y = -50
+
+    local body = love.physics.newBody(menuWorld, x, y, "dynamic")
+
+    local isCircle = math.random() < 0.5
+    local shape
+
+    if isCircle then
+        shape = love.physics.newCircleShape(math.random(10, 30))
+    else
+        shape = love.physics.newRectangleShape(
+            math.random(20, 60),
+            math.random(20, 60)
+        )
+    end
+
+    local fix = love.physics.newFixture(body, shape, 1)
+    fix:setRestitution(0.7)
+    fix:setFriction(0.2)
+
+
+    local obj = {
+        body = body,
+        shape = shape,
+        color = {math.random(), math.random(), math.random()}
+    }
+
+    body:setAngularVelocity(math.random(-5, 5))
+
+    table.insert(menuObjects, obj)
+
+    if #menuObjects > 50 then
+        table.remove(menuObjects, 1)
+    end
+
+end
+
+function initMenuWorld()
+    menuWorld = love.physics.newWorld(0, 800, true)
+    menuObjects = {}
+
+    -- Floor
+    local body = love.physics.newBody(menuWorld, WINDOW_W/2, WINDOW_H + 20, "static")
+    local shape = love.physics.newRectangleShape(WINDOW_W, 40)
+    local fix = love.physics.newFixture(body, shape)
+end
+
+function spawnImpactParticles(x, y, nx, ny, power)
+    power = power or 1
+    power = math.max(0.3, math.min(power, 2))
+
+    for i = 1, math.random(6, 12) do
+        local baseAngle = math.atan2(ny, nx) + math.pi
+        local angle = baseAngle + (math.random() - 0.5) * 1.2
+
+        local speed = math.random(120, 260) * power
+
+        local vx = math.cos(angle) * speed
+        local vy = math.sin(angle) * speed - math.random(80, 160)
+
+        table.insert(impactParticles, {
+            x = x,
+            y = y,
+            vx = vx,
+            vy = vy,
+
+            radius = math.random(2, 4),
+            life = math.random(0.2, 0.4),
+            alpha = 1,
+        })
+    end
 end
 
 function saveWorld(worldName)
